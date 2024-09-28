@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
-use libp2p::PeerId;
+use async_channel::Sender;
+use libp2p::{Multiaddr, PeerId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -20,7 +21,8 @@ pub enum Error {
     SyncError(String),
     JsonDecodingError { error: String, contents: Value },
     JsonEncodingError(String),
-    SwarmError{kind: SwarmErrorType, reason: String}
+    SwarmError{kind: SwarmErrorType, reason: String},
+    DialError{error: String, address: Multiaddr}
 }
 
 impl Display for Error {
@@ -32,7 +34,20 @@ impl Display for Error {
 pub type PodResult<T> = Result<T, Error>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Command {}
+pub enum CommandKind {}
+
+#[derive(Clone, Debug)]
+pub struct Command {
+    pub command: CommandKind,
+    pub response_channel: Sender<PodResult<Value>>
+}
+
+impl Command {
+    pub async fn reply<T: Serialize + DeserializeOwned>(&self, result: PodResult<T>) {
+        let _ = self.response_channel.send(result.and_then(|v| serde_json::to_value(v).or_else(|e| Err(Error::JsonEncodingError(e.to_string()))))).await;
+        ()
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {}

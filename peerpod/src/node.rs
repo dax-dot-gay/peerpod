@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_channel::{Receiver, Sender};
+use async_channel::{unbounded, Receiver, Sender};
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use derive_builder::Builder;
 use libp2p::StreamProtocol;
@@ -14,11 +14,13 @@ use libp2p::{
     tcp, upnp, yamux, Multiaddr, PeerId, Swarm,
 };
 use serde::{Deserialize, Serialize};
+use tokio::task::spawn;
 
+use crate::event_loop::EventLoop;
 use crate::types::{Command, Error, Event, NodeRequest, NodeResponse, PodResult};
 
 #[derive(NetworkBehaviour)]
-struct Behaviour {
+pub struct Behaviour {
     relay_client: relay::client::Behaviour,
     request_response: request_response::json::Behaviour<NodeRequest, NodeResponse>,
     dcutr: dcutr::Behaviour,
@@ -31,8 +33,7 @@ struct Behaviour {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PeerNode {
     Relay(Multiaddr),
-    Rendezvous(Multiaddr),
-    Direct(Multiaddr),
+    Rendezvous(Multiaddr)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,13 +57,13 @@ pub struct Node {
     pub friendly_name: Option<String>,
 
     #[builder(setter(skip))]
-    pub known_nodes: Arc<Mutex<Vec<KnownNode>>>,
-
-    #[builder(setter(skip))]
     pub command_sender: Option<Sender<Command>>,
 
     #[builder(setter(skip))]
     pub event_receiver: Option<Receiver<Event>>,
+
+    #[builder(setter(skip))]
+    pub event_loop: Option<EventLoop>
 }
 
 impl Node {
@@ -86,9 +87,9 @@ impl Node {
             class: info.class,
             bootstrap: info.bootstrap,
             friendly_name: info.friendly_name,
-            known_nodes: Arc::new(Mutex::new(info.known_nodes)),
             command_sender: None,
             event_receiver: None,
+            event_loop: None
         })
     }
 
@@ -96,19 +97,11 @@ impl Node {
         let encoded_key = URL_SAFE.encode(self.key.to_protobuf_encoding().or(Err(
             Error::KeypairError("Failed to encode keypair as bytes".to_string()),
         ))?);
-        let known = self
-            .known_nodes
-            .lock()
-            .or(Err(Error::SyncError(
-                "Failed to unwrap known_nodes".to_string(),
-            )))?
-            .clone();
         Ok(NodeInfo {
             key: encoded_key,
             class: self.class.clone(),
             bootstrap: self.bootstrap.clone(),
-            friendly_name: self.friendly_name.clone(),
-            known_nodes: known,
+            friendly_name: self.friendly_name.clone()
         })
     }
 
@@ -118,39 +111,6 @@ impl Node {
 
     pub fn peer_id(&self) -> PeerId {
         self.key.public().to_peer_id()
-    }
-
-    pub fn add_known(&self, node: KnownNode) -> PodResult<()> {
-        let mut nodes = self.known_nodes.lock().or(Err(Error::SyncError(
-            "Failed to acquire lock on known_nodes".to_string(),
-        )))?;
-        (*nodes).push(node.clone());
-        (*nodes).dedup_by(|a, b| a.id.eq(&b.id));
-        Ok(())
-    }
-
-    pub fn remove_known(&self, id: PeerId) -> PodResult<()> {
-        let mut nodes = self.known_nodes.lock().or(Err(Error::SyncError(
-            "Failed to acquire lock on known_nodes".to_string(),
-        )))?;
-        (*nodes).retain(|v| !v.id.eq(&id));
-        Ok(())
-    }
-
-    pub fn get_known(&self) -> PodResult<Vec<KnownNode>> {
-        let nodes = self.known_nodes.lock().or(Err(Error::SyncError(
-            "Failed to acquire lock on known_nodes".to_string(),
-        )))?;
-        Ok((*nodes).clone())
-    }
-
-    async fn event_loop(
-        &self,
-        swarm: Swarm<Behaviour>,
-        commands: Receiver<Command>,
-        events: Sender<Event>,
-    ) -> PodResult<()> {
-        Ok(())
     }
 
     pub fn initialize(&mut self) -> PodResult<()> {
@@ -200,6 +160,18 @@ impl Node {
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
+
+        for node in self.bootstrap.clone() {
+            let _ = match node {
+                PeerNode::Relay(addr) => swarm.dial(addr.clone()).or_else(|e| Err(Error::DialError { error: e.to_string(), address: addr })),
+                PeerNode::Rendezvous(addr) => swarm.dial(addr.clone()).or_else(|e| Err(Error::DialError { error: e.to_string(), address: addr })),
+            };
+        }
+
+        let (command_send, command_recv) = unbounded::<Command>();
+        let (event_send, event_recv) = unbounded::<Event>();
+        self.event_loop.insert(EventLoop::new(swarm, command_recv, event_send));
+        spawn(self.event_loop.unwrap().run());
         Ok(())
     }
 }
@@ -210,5 +182,4 @@ pub struct NodeInfo {
     pub class: String,
     pub bootstrap: Vec<PeerNode>,
     pub friendly_name: Option<String>,
-    pub known_nodes: Vec<KnownNode>,
 }
