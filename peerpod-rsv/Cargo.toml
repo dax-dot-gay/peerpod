@@ -1,0 +1,11 @@
+[package]
+name = "peerpod-rsv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-channel = "2.3.1"
+clap = { version = "4.5.18", features = ["derive"] }
+libp2p = { version = "0.54.1", features = ["full"] }
+serde_json = { version = "1.0.128", features = ["alloc"] }
+uuid = { version = "1.10.0", features = ["v4", "fast-rng", "serde"] }
