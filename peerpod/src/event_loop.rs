@@ -1,19 +1,21 @@
+use std::collections::HashMap;
+
 use async_channel::{Receiver, Sender};
 use libp2p::{
-    futures::StreamExt, rendezvous::{Namespace, client::Event as RsvEvent}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm,
+    futures::StreamExt, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     node::{Behaviour, BehaviourEvent, NodeInfo, PeerNode},
-    types::{Command, CommandKind, Error, Event, EventKind, PodResult},
+    types::{Command, CommandKind, Error, Event, EventKind, NodeResponse, PodResult},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KnownNode {
     pub id: PeerId,
-    pub addresses: Vec<Multiaddr>,
-    pub friendly_name: Option<String>,
+    pub addresses: Vec<Multiaddr>
 }
 
 pub struct EventLoop {
@@ -23,6 +25,7 @@ pub struct EventLoop {
     pub known_nodes: Vec<KnownNode>,
     pub address: String,
     pub node_info: NodeInfo,
+    pub channels: HashMap<Uuid, ResponseChannel<NodeResponse>>
 }
 
 impl EventLoop {
@@ -77,7 +80,7 @@ impl EventLoop {
         if let Some(found) = self.get_known(id) {
             return found.clone();
         }
-        return self.add_known(KnownNode {id, addresses: Vec::new(), friendly_name: None}).clone();
+        return self.add_known(KnownNode {id, addresses: Vec::new()}).clone();
     }
 
     pub fn namespace(&self) -> PodResult<Namespace> {
@@ -89,8 +92,7 @@ impl EventLoop {
             SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
                 let result = self.add_known(KnownNode {
                     id: peer_id,
-                    addresses: vec![address.clone()],
-                    friendly_name: None,
+                    addresses: vec![address.clone()]
                 });
                 self.event(EventKind::PeerUpdate(result)).await;
                 Ok(())
@@ -143,14 +145,28 @@ impl EventLoop {
                         for reg in registrations {
                             let node = KnownNode {
                                 id: reg.record.peer_id(),
-                                addresses: reg.record.addresses().to_vec(),
-                                friendly_name: None
+                                addresses: reg.record.addresses().to_vec()
                             };
                             self.add_known(node.clone());
                             self.event(EventKind::Discovered { rendezvous: rsv_node.clone(), peer: node }).await;
                         }
                         Ok(())
                     }
+                    _ => Ok(())
+                },
+                BehaviourEvent::RequestResponse(req) => match req {
+                    ReqEvent::Message { peer, message } => match message {
+                        Message::Request { request, channel, .. } => {
+                            let node = self.ensure_known(peer);
+                            self.channels.insert(request.id, channel);
+                            self.event(EventKind::ReceivedRequest { source: node.clone(), request: request.clone() }).await;
+                            Ok(())
+                        },
+                        Message::Response { response, .. } => {
+                            self.event(EventKind::ReceivedResponse(response.clone())).await;
+                            Ok(())
+                        }
+                    },
                     _ => Ok(())
                 }
                 _ => Ok(())
@@ -163,7 +179,8 @@ impl EventLoop {
         match command.command {
             CommandKind::GetKnownNodes => {
                 command.reply(Ok(self.known_nodes.clone())).await;
-            }
+            },
+            CommandKind::SendRequest { target, request } => 
         }
         Ok(())
     }
@@ -221,6 +238,7 @@ impl EventLoop {
             known_nodes: Vec::new(),
             address,
             node_info: info,
+            channels: HashMap::new()
         }
     }
 }

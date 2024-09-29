@@ -44,7 +44,8 @@ pub type PodResult<T> = Result<T, Error>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandKind {
-    GetKnownNodes
+    GetKnownNodes,
+    SendRequest{target: PeerId, request: NodeRequest}
 }
 
 #[derive(Clone, Debug)]
@@ -69,7 +70,9 @@ pub enum EventKind {
     RegistrationFailed {node: KnownNode, reason: String},
     Listening(Multiaddr),
     Connected(KnownNode),
-    Discovered {rendezvous: KnownNode, peer: KnownNode}
+    Discovered {rendezvous: KnownNode, peer: KnownNode},
+    ReceivedRequest {source: KnownNode, request: NodeRequest},
+    ReceivedResponse(NodeResponse)
 }
 
 impl EventKind {
@@ -116,6 +119,10 @@ impl NodeRequest {
             content: serde_json::to_value(content)
                 .or_else(|e| Err(Error::JsonEncodingError(e.to_string())))?,
         })
+    }
+
+    pub fn respond<T: Serialize + DeserializeOwned, E: Serialize + DeserializeOwned>(&self, result: Result<T, E>) -> PodResult<NodeResponse> {
+        NodeResponse::respond(self.clone(), result)
     }
 }
 

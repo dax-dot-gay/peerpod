@@ -10,7 +10,7 @@ async fn main() -> Result<(), Error> {
     .add_relay(
         "12D3KooWRW5KgEc71mvCcd2hFtuH3HhthJRSpeM7h4LURDif9cMF".to_string(),
         "/ip4/192.168.0.41/tcp/8080".to_string(),
-    )?.class("test".to_string()).listen_address("/ip4/0.0.0.0/tcp/0".to_string()).friendly_name(None).build().expect("Failed to build");
+    )?.class("test".to_string()).listen_address("/ip4/0.0.0.0/tcp/0".to_string()).build().expect("Failed to build");
     let _ = node.initialize();
     loop {
         if let Some(ref recv) = node.event_receiver {

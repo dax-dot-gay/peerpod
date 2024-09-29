@@ -50,8 +50,6 @@ pub struct Node {
     #[builder(default = "\"/ip4/0.0.0.0/tcp/0\".to_string()")]
     pub listen_address: String,
 
-    pub friendly_name: Option<String>,
-
     #[builder(setter(skip))]
     pub command_sender: Option<Sender<Command>>,
 
@@ -110,7 +108,6 @@ impl Node {
             key: keypair,
             class: info.class,
             bootstrap: info.bootstrap,
-            friendly_name: info.friendly_name,
             command_sender: None,
             event_receiver: None,
             event_loop: None,
@@ -126,7 +123,6 @@ impl Node {
             key: encoded_key,
             class: self.class.clone(),
             bootstrap: self.bootstrap.clone(),
-            friendly_name: self.friendly_name.clone(),
             listen_address: self.listen_address.clone(),
         })
     }
@@ -228,6 +224,5 @@ pub struct NodeInfo {
     pub key: String,
     pub class: String,
     pub bootstrap: Vec<PeerNode>,
-    pub friendly_name: Option<String>,
     pub listen_address: String,
 }
