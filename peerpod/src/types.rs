@@ -31,7 +31,10 @@ pub enum Error {
     InvalidPeerId(String),
     InvalidClass(String),
     TransportError(String),
-    RegistrationFailed{peer: PeerId, error: String}
+    RegistrationFailed{peer: PeerId, error: String},
+    ExpiredRequest,
+    NotInitialized,
+    ChannelFailure(String)
 }
 
 impl Display for Error {
@@ -45,7 +48,8 @@ pub type PodResult<T> = Result<T, Error>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandKind {
     GetKnownNodes,
-    SendRequest{target: PeerId, request: NodeRequest}
+    SendRequest{target: PeerId, request: NodeRequest},
+    SendResponse{response: NodeResponse}
 }
 
 #[derive(Clone, Debug)]

@@ -176,11 +176,22 @@ impl EventLoop {
     }
 
     async fn handle_command(&mut self, command: Command) -> PodResult<()> {
-        match command.command {
+        match command.command.clone() {
             CommandKind::GetKnownNodes => {
                 command.reply(Ok(self.known_nodes.clone())).await;
             },
-            CommandKind::SendRequest { target, request } => 
+            CommandKind::SendRequest { target, request } => {
+                self.swarm.behaviour_mut().request_response.send_request(&target, request);
+                command.reply(Ok(())).await;
+            },
+            CommandKind::SendResponse { response } => {
+                if let Some(channel) = self.channels.remove(&response.clone().request_id) {
+                    let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.clone());
+                    command.reply(Ok(())).await;
+                } else {
+                    command.reply::<()>(Err(Error::ExpiredRequest)).await;
+                }
+            }
         }
         Ok(())
     }

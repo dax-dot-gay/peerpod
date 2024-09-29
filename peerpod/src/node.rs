@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{bounded, unbounded, Receiver, Sender};
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use derive_builder::Builder;
 use libp2p::StreamProtocol;
@@ -13,11 +13,13 @@ use libp2p::{
     swarm::NetworkBehaviour,
     tcp, upnp, yamux, Multiaddr, PeerId,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::task::{spawn, JoinHandle};
 
 use crate::event_loop::EventLoop;
-use crate::types::{Command, Error, Event, NodeRequest, NodeResponse, PodResult};
+use crate::types::{Command, CommandKind, Error, Event, NodeRequest, NodeResponse, PodResult};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -216,6 +218,24 @@ impl Node {
         let _ = self.command_sender.insert(command_send);
         let _ = self.event_receiver.insert(event_recv);
         Ok(())
+    }
+
+    pub async fn execute_command<T: Serialize + DeserializeOwned>(&self, command: CommandKind) -> PodResult<T> {
+        if let Some(sender) = self.command_sender.clone() {
+            let (tx, rx) = bounded::<PodResult<Value>>(1);
+            let cmd = Command {
+                command,
+                response_channel: tx.clone()
+            };
+            sender.send(cmd).await.or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
+            let response = rx.recv().await.or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
+            match response {
+                Ok(success) => Ok(serde_json::from_value::<T>(success.clone()).or_else(|e| Err(Error::JsonDecodingError { error: e.to_string(), contents: success.clone() }))?),
+                Err(e) => Err(e)
+            }
+        } else {
+            Err(Error::NotInitialized)
+        }
     }
 }
 
