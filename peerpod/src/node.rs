@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::str::FromStr;
 use std::time::Duration;
 
 use async_channel::{unbounded, Receiver, Sender};
@@ -11,39 +11,32 @@ use libp2p::{
     noise, relay, rendezvous,
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
-    tcp, upnp, yamux, Multiaddr, PeerId, Swarm,
+    tcp, upnp, yamux, Multiaddr, PeerId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::task::spawn;
+use tokio::task::{spawn, JoinHandle};
 
 use crate::event_loop::EventLoop;
 use crate::types::{Command, Error, Event, NodeRequest, NodeResponse, PodResult};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
-    relay_client: relay::client::Behaviour,
-    request_response: request_response::json::Behaviour<NodeRequest, NodeResponse>,
-    dcutr: dcutr::Behaviour,
-    rendezvous: rendezvous::client::Behaviour,
-    identify: identify::Behaviour,
-    upnp: upnp::tokio::Behaviour,
-    autonat: autonat::Behaviour,
+    pub relay_client: relay::client::Behaviour,
+    pub request_response: request_response::json::Behaviour<NodeRequest, NodeResponse>,
+    pub dcutr: dcutr::Behaviour,
+    pub rendezvous: rendezvous::client::Behaviour,
+    pub identify: identify::Behaviour,
+    pub upnp: upnp::tokio::Behaviour,
+    pub autonat: autonat::Behaviour,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PeerNode {
-    Relay(Multiaddr),
-    Rendezvous(Multiaddr)
+    Relay(PeerId, Multiaddr),
+    Rendezvous(PeerId, Multiaddr),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct KnownNode {
-    pub id: PeerId,
-    pub address: PeerNode,
-    pub friendly_name: Option<String>,
-}
-
-#[derive(Clone, Debug, Builder)]
+#[derive(Builder)]
 pub struct Node {
     #[builder(default = "Keypair::generate_ed25519()")]
     pub key: Keypair,
@@ -54,6 +47,9 @@ pub struct Node {
     #[builder(default = "Vec::new()")]
     pub bootstrap: Vec<PeerNode>,
 
+    #[builder(default = "\"/ip4/0.0.0.0/tcp/0\".to_string()")]
+    pub listen_address: String,
+
     pub friendly_name: Option<String>,
 
     #[builder(setter(skip))]
@@ -63,7 +59,35 @@ pub struct Node {
     pub event_receiver: Option<Receiver<Event>>,
 
     #[builder(setter(skip))]
-    pub event_loop: Option<EventLoop>
+    pub event_loop: Option<JoinHandle<PodResult<()>>>,
+}
+
+impl NodeBuilder {
+    pub fn add_rendezvous(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder>{
+        let peer_id = PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
+        let multiaddr = Multiaddr::from_str(&address.clone().as_str()).or(Err(Error::InvalidMultiAddr(address.clone())))?;
+        if self.bootstrap.is_none() {
+            self.bootstrap = Some(Vec::new());
+        }
+        if let Some(bootstrap) = &mut self.bootstrap {
+            bootstrap.push(PeerNode::Rendezvous(peer_id, multiaddr));
+        }
+
+        Ok(self)
+    }
+
+    pub fn add_relay(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder>{
+        let peer_id = PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
+        let multiaddr = Multiaddr::from_str(&address.clone().as_str()).or(Err(Error::InvalidMultiAddr(address.clone())))?;
+        if self.bootstrap.is_none() {
+            self.bootstrap = Some(Vec::new());
+        }
+        if let Some(bootstrap) = &mut self.bootstrap {
+            bootstrap.push(PeerNode::Relay(peer_id, multiaddr));
+        }
+
+        Ok(self)
+    }
 }
 
 impl Node {
@@ -89,7 +113,8 @@ impl Node {
             friendly_name: info.friendly_name,
             command_sender: None,
             event_receiver: None,
-            event_loop: None
+            event_loop: None,
+            listen_address: info.listen_address,
         })
     }
 
@@ -101,7 +126,8 @@ impl Node {
             key: encoded_key,
             class: self.class.clone(),
             bootstrap: self.bootstrap.clone(),
-            friendly_name: self.friendly_name.clone()
+            friendly_name: self.friendly_name.clone(),
+            listen_address: self.listen_address.clone(),
         })
     }
 
@@ -114,6 +140,9 @@ impl Node {
     }
 
     pub fn initialize(&mut self) -> PodResult<()> {
+        if self.event_loop.is_some() {
+            return Err(Error::AlreadyInitialized);
+        }
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(self.key.clone())
             .with_tokio()
             .with_tcp(
@@ -163,15 +192,33 @@ impl Node {
 
         for node in self.bootstrap.clone() {
             let _ = match node {
-                PeerNode::Relay(addr) => swarm.dial(addr.clone()).or_else(|e| Err(Error::DialError { error: e.to_string(), address: addr })),
-                PeerNode::Rendezvous(addr) => swarm.dial(addr.clone()).or_else(|e| Err(Error::DialError { error: e.to_string(), address: addr })),
+                PeerNode::Relay(_, addr) => swarm.dial(addr.clone()).or_else(|e| {
+                    Err(Error::DialError {
+                        error: e.to_string(),
+                        address: addr,
+                    })
+                }),
+                PeerNode::Rendezvous(_, addr) => swarm.dial(addr.clone()).or_else(|e| {
+                    Err(Error::DialError {
+                        error: e.to_string(),
+                        address: addr,
+                    })
+                }),
             };
         }
 
         let (command_send, command_recv) = unbounded::<Command>();
         let (event_send, event_recv) = unbounded::<Event>();
-        self.event_loop.insert(EventLoop::new(swarm, command_recv, event_send));
-        spawn(self.event_loop.unwrap().run());
+        let mut ev_loop = EventLoop::new(
+            swarm,
+            command_recv,
+            event_send,
+            self.listen_address.clone(),
+            self.into_info()?,
+        );
+        self.event_loop = Some(spawn(async move { ev_loop.run().await }));
+        let _ = self.command_sender.insert(command_send);
+        let _ = self.event_receiver.insert(event_recv);
         Ok(())
     }
 }
@@ -182,4 +229,5 @@ pub struct NodeInfo {
     pub class: String,
     pub bootstrap: Vec<PeerNode>,
     pub friendly_name: Option<String>,
+    pub listen_address: String,
 }

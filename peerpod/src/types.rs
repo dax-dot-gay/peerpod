@@ -6,6 +6,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::event_loop::KnownNode;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SwarmErrorType {
     Initialization,
@@ -22,7 +24,14 @@ pub enum Error {
     JsonDecodingError { error: String, contents: Value },
     JsonEncodingError(String),
     SwarmError{kind: SwarmErrorType, reason: String},
-    DialError{error: String, address: Multiaddr}
+    DialError{error: String, address: Multiaddr},
+    AlreadyInitialized,
+    ChannelClosed,
+    InvalidMultiAddr(String),
+    InvalidPeerId(String),
+    InvalidClass(String),
+    TransportError(String),
+    RegistrationFailed{peer: PeerId, error: String}
 }
 
 impl Display for Error {
@@ -34,7 +43,9 @@ impl Display for Error {
 pub type PodResult<T> = Result<T, Error>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum CommandKind {}
+pub enum CommandKind {
+    GetKnownNodes
+}
 
 #[derive(Clone, Debug)]
 pub struct Command {
@@ -50,7 +61,31 @@ impl Command {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Event {}
+pub enum EventKind {
+    Error(Error),
+    PeerUpdate(KnownNode),
+    RegisteringAt(KnownNode),
+    RegisteredAt(KnownNode),
+    RegistrationFailed {node: KnownNode, reason: String},
+    Listening(Multiaddr),
+    Connected(KnownNode),
+    Discovered {rendezvous: KnownNode, peer: KnownNode}
+}
+
+impl EventKind {
+    pub fn wrap(&self) -> Event {
+        Event {
+            id: Uuid::new_v4(),
+            event: self.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Event {
+    pub id: Uuid,
+    pub event: EventKind
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NodeRequest {
