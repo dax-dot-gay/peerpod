@@ -27,6 +27,7 @@ use libp2p::{
     core::multiaddr::Protocol,
     core::Multiaddr,
     identify, identity, noise, ping, relay,
+    rendezvous,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux,
 };
@@ -59,6 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "/TODO/0.0.1".to_string(),
                 key.public(),
             )),
+            rendezvous: rendezvous::server::Behaviour::new(rendezvous::server::Config::default())
         })?
         .build();
 
@@ -79,6 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with(Protocol::Udp(opt.port))
         .with(Protocol::QuicV1);
     swarm.listen_on(listen_addr_quic)?;
+    println!("Peer ID: {}", swarm.local_peer_id().to_string());
 
     block_on(async {
         loop {
@@ -108,6 +111,7 @@ struct Behaviour {
     relay: relay::Behaviour,
     ping: ping::Behaviour,
     identify: identify::Behaviour,
+    rendezvous: rendezvous::server::Behaviour
 }
 
 fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {

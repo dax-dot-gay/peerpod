@@ -31,7 +31,7 @@ impl EventLoop {
             if known.id == node.id {
                 known
                     .addresses
-                    .clone_from_slice(node.addresses.clone().as_mut_slice());
+                    .extend_from_slice(node.addresses.as_slice());
                 known.addresses.dedup();
                 return known.clone();
             }
