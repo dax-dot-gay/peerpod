@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::task::{spawn, JoinHandle};
 
 use crate::event_loop::EventLoop;
-use crate::types::{Command, CommandKind, Error, Event, NodeRequest, NodeResponse, PodResult};
+use crate::types::{Command, CommandKind, Error, Event, EventKind, EventType, NodeRequest, NodeResponse, PodResult};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -36,6 +36,18 @@ pub struct Behaviour {
 pub enum PeerNode {
     Relay(PeerId, Multiaddr),
     Rendezvous(PeerId, Multiaddr),
+}
+
+#[derive(Clone, Debug)]
+pub enum Listener {
+    Event {
+        kind: EventType,
+        listener: fn(EventKind) -> ()
+    },
+    Request {
+        path: String,
+        listener: fn(NodeRequest) -> NodeResponse
+    }
 }
 
 #[derive(Builder)]
@@ -60,6 +72,9 @@ pub struct Node {
 
     #[builder(setter(skip))]
     pub event_loop: Option<JoinHandle<PodResult<()>>>,
+
+    #[builder(setter(skip))]
+    pub listeners: Vec<Listener>
 }
 
 impl NodeBuilder {
@@ -114,6 +129,7 @@ impl Node {
             event_receiver: None,
             event_loop: None,
             listen_address: info.listen_address,
+            listeners: Vec::new()
         })
     }
 

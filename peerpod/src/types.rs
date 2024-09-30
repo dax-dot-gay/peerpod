@@ -66,6 +66,18 @@ impl Command {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum EventType {
+    Error,
+    PeerUpdate,
+    RegisteringAt,
+    RegisteredAt,
+    RegistrationFailed,
+    Listening,
+    Connected,
+    Discovered
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EventKind {
     Error(Error),
     PeerUpdate(KnownNode),
@@ -98,6 +110,7 @@ pub struct Event {
 pub struct NodeRequest {
     pub id: Uuid,
     pub source: PeerId,
+    pub request: String,
     pub content: Value,
 }
 
@@ -115,11 +128,13 @@ impl NodeRequest {
 
     pub fn new<T: Serialize + DeserializeOwned>(
         source: PeerId,
+        request: String,
         content: T,
     ) -> PodResult<NodeRequest> {
         Ok(NodeRequest {
             id: Uuid::new_v4(),
             source: source.clone(),
+            request,
             content: serde_json::to_value(content)
                 .or_else(|e| Err(Error::JsonEncodingError(e.to_string())))?,
         })
