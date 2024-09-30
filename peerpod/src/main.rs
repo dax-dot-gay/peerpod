@@ -12,6 +12,10 @@ async fn main() -> Result<(), Error> {
         "/ip4/192.168.0.41/tcp/8080".to_string(),
     )?.class("test".to_string()).listen_address("/ip4/0.0.0.0/tcp/0".to_string()).build().expect("Failed to build");
     let _ = node.initialize();
+    node.on_request::<String, String, Error>("/test".to_string(), |val| {
+        println!("{val}");
+        Ok(String::new())
+    }).await?;
     loop {
         if let Some(ref recv) = node.event_receiver {
             let mut pinned = Box::pin(recv.clone());

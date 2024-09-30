@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::event_loop::KnownNode;
+use crate::event_loop::{KnownNode, Listener};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SwarmErrorType {
@@ -34,7 +34,8 @@ pub enum Error {
     RegistrationFailed{peer: PeerId, error: String},
     ExpiredRequest,
     NotInitialized,
-    ChannelFailure(String)
+    ChannelFailure(String),
+    UnknownListener(Uuid)
 }
 
 impl Display for Error {
@@ -45,14 +46,16 @@ impl Display for Error {
 
 pub type PodResult<T> = Result<T, Error>;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone)]
 pub enum CommandKind {
     GetKnownNodes,
     SendRequest{target: PeerId, request: NodeRequest},
-    SendResponse{response: NodeResponse}
+    SendResponse{response: NodeResponse},
+    RegisterListener(Listener),
+    DeregisterListener(Uuid)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Command {
     pub command: CommandKind,
     pub response_channel: Sender<PodResult<Value>>
@@ -65,7 +68,7 @@ impl Command {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EventType {
     Error,
     PeerUpdate,
@@ -74,7 +77,9 @@ pub enum EventType {
     RegistrationFailed,
     Listening,
     Connected,
-    Discovered
+    Discovered,
+    Request,
+    Response
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,6 +101,21 @@ impl EventKind {
         Event {
             id: Uuid::new_v4(),
             event: self.clone()
+        }
+    }
+
+    pub fn kind(&self) -> EventType {
+        match self {
+            EventKind::Error(_) => EventType::Error,
+            EventKind::PeerUpdate(_) => EventType::PeerUpdate,
+            EventKind::RegisteringAt(_) => EventType::RegisteringAt,
+            EventKind::RegisteredAt(_) => EventType::RegisteredAt,
+            EventKind::RegistrationFailed { .. } => EventType::RegistrationFailed,
+            EventKind::Listening(_) => EventType::Listening,
+            EventKind::Connected(_) => EventType::Connected,
+            EventKind::Discovered { .. } => EventType::Discovered,
+            EventKind::ReceivedRequest { .. } => EventType::Request,
+            EventKind::ReceivedResponse(_) => EventType::Response
         }
     }
 }

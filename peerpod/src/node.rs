@@ -1,4 +1,6 @@
+use std::fmt::{Debug, Display};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
@@ -17,9 +19,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task::{spawn, JoinHandle};
+use uuid::Uuid;
 
 use crate::event_loop::EventLoop;
-use crate::types::{Command, CommandKind, Error, Event, EventKind, EventType, NodeRequest, NodeResponse, PodResult};
+use crate::types::{
+    Command, CommandKind, Error, Event, EventKind, EventType, NodeRequest, NodeResponse, PodResult,
+};
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -36,18 +41,6 @@ pub struct Behaviour {
 pub enum PeerNode {
     Relay(PeerId, Multiaddr),
     Rendezvous(PeerId, Multiaddr),
-}
-
-#[derive(Clone, Debug)]
-pub enum Listener {
-    Event {
-        kind: EventType,
-        listener: fn(EventKind) -> ()
-    },
-    Request {
-        path: String,
-        listener: fn(NodeRequest) -> NodeResponse
-    }
 }
 
 #[derive(Builder)]
@@ -72,15 +65,14 @@ pub struct Node {
 
     #[builder(setter(skip))]
     pub event_loop: Option<JoinHandle<PodResult<()>>>,
-
-    #[builder(setter(skip))]
-    pub listeners: Vec<Listener>
 }
 
 impl NodeBuilder {
-    pub fn add_rendezvous(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder>{
-        let peer_id = PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
-        let multiaddr = Multiaddr::from_str(&address.clone().as_str()).or(Err(Error::InvalidMultiAddr(address.clone())))?;
+    pub fn add_rendezvous(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder> {
+        let peer_id =
+            PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
+        let multiaddr = Multiaddr::from_str(&address.clone().as_str())
+            .or(Err(Error::InvalidMultiAddr(address.clone())))?;
         if self.bootstrap.is_none() {
             self.bootstrap = Some(Vec::new());
         }
@@ -91,9 +83,11 @@ impl NodeBuilder {
         Ok(self)
     }
 
-    pub fn add_relay(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder>{
-        let peer_id = PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
-        let multiaddr = Multiaddr::from_str(&address.clone().as_str()).or(Err(Error::InvalidMultiAddr(address.clone())))?;
+    pub fn add_relay(&mut self, id: String, address: String) -> PodResult<&mut NodeBuilder> {
+        let peer_id =
+            PeerId::from_str(id.clone().as_str()).or(Err(Error::InvalidPeerId(id.clone())))?;
+        let multiaddr = Multiaddr::from_str(&address.clone().as_str())
+            .or(Err(Error::InvalidMultiAddr(address.clone())))?;
         if self.bootstrap.is_none() {
             self.bootstrap = Some(Vec::new());
         }
@@ -129,7 +123,6 @@ impl Node {
             event_receiver: None,
             event_loop: None,
             listen_address: info.listen_address,
-            listeners: Vec::new()
         })
     }
 
@@ -236,22 +229,86 @@ impl Node {
         Ok(())
     }
 
-    pub async fn execute_command<T: Serialize + DeserializeOwned>(&self, command: CommandKind) -> PodResult<T> {
+    pub async fn execute_command<T: Serialize + DeserializeOwned>(
+        &self,
+        command: CommandKind,
+    ) -> PodResult<T> {
         if let Some(sender) = self.command_sender.clone() {
             let (tx, rx) = bounded::<PodResult<Value>>(1);
             let cmd = Command {
                 command,
-                response_channel: tx.clone()
+                response_channel: tx.clone(),
             };
-            sender.send(cmd).await.or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
-            let response = rx.recv().await.or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
+            sender
+                .send(cmd)
+                .await
+                .or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
+            let response = rx
+                .recv()
+                .await
+                .or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
             match response {
-                Ok(success) => Ok(serde_json::from_value::<T>(success.clone()).or_else(|e| Err(Error::JsonDecodingError { error: e.to_string(), contents: success.clone() }))?),
-                Err(e) => Err(e)
+                Ok(success) => Ok(serde_json::from_value::<T>(success.clone()).or_else(|e| {
+                    Err(Error::JsonDecodingError {
+                        error: e.to_string(),
+                        contents: success.clone(),
+                    })
+                })?),
+                Err(e) => Err(e),
             }
         } else {
             Err(Error::NotInitialized)
         }
+    }
+
+    pub async fn on_event(
+        &self,
+        event: EventType,
+        listener: fn(EventKind) -> (),
+    ) -> PodResult<Uuid> {
+        self.execute_command::<Uuid>(CommandKind::RegisterListener(
+            crate::event_loop::Listener::Event {
+                kind: event,
+                listener,
+            },
+        ))
+        .await
+    }
+
+    pub async fn on_request<
+        T: Serialize + DeserializeOwned + Clone + 'static,
+        R: Serialize + DeserializeOwned + Clone + 'static,
+        E: Serialize + DeserializeOwned + Clone + Debug + Display + 'static,
+    >(
+        &self,
+        path: String,
+        listener: fn(T) -> Result<R, E>,
+    ) -> PodResult<Uuid> {
+        let process_internal = move |request: NodeRequest| {
+            {
+                match request.unwrap::<T>() {
+                    Ok(parsed) => match request.respond(listener(parsed)) {
+                        Ok(r) => Ok::<NodeResponse, E>(r),
+                        Err(e) => Ok(request
+                            .respond::<T, Error>(Err(e))
+                            .expect("Failed to wrap internal error.")),
+                    },
+                    Err(e) => Ok(request
+                        .respond::<T, Error>(Err(e))
+                        .expect("Failed to wrap internal error.")),
+                }
+                .unwrap()
+            }
+            .clone()
+        };
+
+        self.execute_command(CommandKind::RegisterListener(
+            crate::event_loop::Listener::Request {
+                path,
+                listener: Arc::new(Mutex::new(process_internal)),
+            },
+        ))
+        .await
     }
 }
 

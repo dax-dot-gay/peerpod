@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use async_channel::{Receiver, Sender};
 use libp2p::{
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     node::{Behaviour, BehaviourEvent, NodeInfo, PeerNode},
-    types::{Command, CommandKind, Error, Event, EventKind, NodeResponse, PodResult},
+    types::{Command, CommandKind, Error, Event, EventKind, EventType, NodeRequest, NodeResponse, PodResult},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,7 +25,20 @@ pub struct EventLoop {
     pub known_nodes: Vec<KnownNode>,
     pub address: String,
     pub node_info: NodeInfo,
-    pub channels: HashMap<Uuid, ResponseChannel<NodeResponse>>
+    pub channels: HashMap<Uuid, ResponseChannel<NodeResponse>>,
+    pub listeners: HashMap<Uuid, Listener>
+}
+
+#[derive(Clone)]
+pub enum Listener {
+    Event {
+        kind: EventType,
+        listener: fn(EventKind) -> ()
+    },
+    Request {
+        path: String,
+        listener: Arc<Mutex<dyn Fn(NodeRequest) -> NodeResponse + Send + Sync>>
+    }
 }
 
 impl EventLoop {
@@ -181,15 +194,27 @@ impl EventLoop {
                 command.reply(Ok(self.known_nodes.clone())).await;
             },
             CommandKind::SendRequest { target, request } => {
-                self.swarm.behaviour_mut().request_response.send_request(&target, request);
+                self.swarm.behaviour_mut().request_response.send_request(&target, request.clone());
                 command.reply(Ok(())).await;
             },
-            CommandKind::SendResponse { response } => {
+            CommandKind::SendResponse {response } => {
                 if let Some(channel) = self.channels.remove(&response.clone().request_id) {
                     let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.clone());
                     command.reply(Ok(())).await;
                 } else {
                     command.reply::<()>(Err(Error::ExpiredRequest)).await;
+                }
+            },
+            CommandKind::RegisterListener(listener) => {
+                let id = Uuid::new_v4();
+                self.listeners.insert(id.clone(), listener);
+                command.reply(Ok(id)).await;
+            },
+            CommandKind::DeregisterListener(id) => {
+                if let Some(_) = self.listeners.remove(&id) {
+                    command.reply(Ok(())).await;
+                } else {
+                    command.reply::<()>(Err(Error::UnknownListener(id.clone()))).await;
                 }
             }
         }
@@ -198,6 +223,29 @@ impl EventLoop {
 
     async fn event(&mut self, event: EventKind) {
         let _ = self.events.send(event.wrap()).await;
+        let event_type = event.kind();
+        for listener in self.listeners.values() {
+            let evt = event.clone();
+            match listener {
+                Listener::Event { kind, listener } => {
+                    if *kind == event_type {
+                        listener(evt);
+                    }
+                },
+                Listener::Request { path, listener } => {
+                    if let EventKind::ReceivedRequest { request, .. } = evt {
+                        if request.request == path.clone() {
+                            if let Ok(func) = listener.lock() {
+                                let response = func(request.clone());
+                                if let Some(ch) = self.channels.remove(&response.request_id) {
+                                    let _ = self.swarm.behaviour_mut().request_response.send_response(ch, response);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[allow(unreachable_code)]
@@ -249,7 +297,8 @@ impl EventLoop {
             known_nodes: Vec::new(),
             address,
             node_info: info,
-            channels: HashMap::new()
+            channels: HashMap::new(),
+            listeners: HashMap::new()
         }
     }
 }
