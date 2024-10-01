@@ -1,10 +1,12 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 
 use async_channel::{Receiver, Sender};
+use chrono::Utc;
 use libp2p::{
     futures::StreamExt, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, OutboundRequestId, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::{
@@ -27,7 +29,8 @@ pub struct EventLoop {
     pub node_info: NodeInfo,
     pub channels: HashMap<Uuid, ResponseChannel<NodeResponse>>,
     pub active_requests: HashMap<OutboundRequestId, Uuid>,
-    pub listeners: HashMap<Uuid, Listener>
+    pub listeners: HashMap<Uuid, Listener>,
+    pub last_register: HashMap<PeerId, i64>
 }
 
 #[derive(Clone)]
@@ -49,7 +52,7 @@ impl EventLoop {
                 known
                     .addresses
                     .extend_from_slice(node.addresses.as_slice());
-                known.addresses.dedup();
+                known.addresses.dedup_by(|a, b| a.to_string() == b.to_string());
                 return known.clone();
             }
         }
@@ -102,7 +105,7 @@ impl EventLoop {
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) -> PodResult<()> {
-        println!("EVENT :: {event:?}");
+        //println!("EVENT :: {event:?}");
         match event {
             SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
                 let result = self.add_known(KnownNode {
@@ -121,7 +124,7 @@ impl EventLoop {
                         .register(
                             ns,
                             peer_id,
-                            None,
+                            Some(4 * 60 * 60),
                         )
                         .or_else(|e| {
                             Err(Error::RegistrationFailed {
@@ -130,6 +133,7 @@ impl EventLoop {
                             })
                         })?;
                     let node = self.ensure_known(peer_id);
+                    self.last_register.insert(peer_id.clone(), Utc::now().timestamp());
                     self.event(EventKind::RegisteringAt(node)).await;
                 }
 
@@ -226,7 +230,7 @@ impl EventLoop {
                 let mut rsv_nodes = Vec::<PeerId>::new();
                 for node in self.known_nodes.clone() {
                     if self.is_rendezvous(node.id) {
-                        println!("CHECKING :: {node:?}");
+                        //println!("CHECKING :: {node:?}");
                         if let Ok(ns) = self.namespace() {
                             self.swarm.behaviour_mut().rendezvous.discover(Some(ns), None, None, node.id.clone());
                             rsv_nodes.push(node.id.clone());
@@ -298,7 +302,8 @@ impl EventLoop {
                     self.handle_command(command).await
                 } else {
                     Err(Error::ChannelClosed)
-                }
+                },
+                _ = sleep(Duration::from_secs(30)) => Ok(())
             };
             if let Err(error) = result {
                 let _ = self
@@ -307,6 +312,13 @@ impl EventLoop {
                     .await;
                 if let Error::ChannelClosed = error {
                     break;
+                }
+            }
+
+            for (peer, dt) in self.last_register.clone() {
+                if dt + (2 * 60 * 60) <= Utc::now().timestamp() {
+                    let ns = self.namespace().expect("Invalid namespace.");
+                    let _ = self.swarm.behaviour_mut().rendezvous.register(ns, peer, Some(4 * 60 * 60));
                 }
             }
         }
@@ -330,7 +342,8 @@ impl EventLoop {
             node_info: info,
             channels: HashMap::new(),
             listeners: HashMap::new(),
-            active_requests: HashMap::new()
+            active_requests: HashMap::new(),
+            last_register: HashMap::new()
         }
     }
 }
