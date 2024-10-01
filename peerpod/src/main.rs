@@ -1,5 +1,7 @@
-use libp2p::futures::StreamExt;
+use std::time::Duration;
+
 use peerpod::{node::NodeBuilder, types::Error};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -16,17 +18,18 @@ async fn main() -> Result<(), Error> {
         println!("{val}");
         Ok(String::new())
     }).await?;
+    node.on_event(peerpod::types::EventType::Discovered, |ev| println!("{ev:?}")).await?;
+    node.on_event(peerpod::types::EventType::RequestFailed, |ev| println!("{ev:?}")).await?;
     loop {
-        if let Some(ref recv) = node.event_receiver {
-            let mut pinned = Box::pin(recv.clone());
-            if let Some(event) = pinned.next().await {
-                println!("{event:?}");
-            } else {
-                break;
+        println!("LOOP");
+        for peer in node.get_peers().await? {
+            println!("PEER: {peer:?}");
+            if peer.id.to_string() != "12D3KooWRW5KgEc71mvCcd2hFtuH3HhthJRSpeM7h4LURDif9cMF".to_string() {
+                println!("SENDING TO: {:?}", peer);
+                println!("{:?}", node.request::<String, String, Error>(peer.id.to_string(), "/test".to_string(), "BEANS!".to_string()).await);
             }
-        } else {
-            break;
+            
         }
+        sleep(Duration::from_secs(2)).await;
     }
-    Ok(())
 }

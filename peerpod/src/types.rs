@@ -35,7 +35,9 @@ pub enum Error {
     ExpiredRequest,
     NotInitialized,
     ChannelFailure(String),
-    UnknownListener(Uuid)
+    UnknownListener(Uuid),
+    NoListener,
+    RequestFailed(String)
 }
 
 impl Display for Error {
@@ -50,9 +52,9 @@ pub type PodResult<T> = Result<T, Error>;
 pub enum CommandKind {
     GetKnownNodes,
     SendRequest{target: PeerId, request: NodeRequest},
-    SendResponse{response: NodeResponse},
     RegisterListener(Listener),
-    DeregisterListener(Uuid)
+    DeregisterListener(Uuid),
+    DiscoverPeers
 }
 
 #[derive(Clone)]
@@ -79,7 +81,9 @@ pub enum EventType {
     Connected,
     Discovered,
     Request,
-    Response
+    Response,
+    RequestFailed,
+    DiscoverFailed
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,7 +97,9 @@ pub enum EventKind {
     Connected(KnownNode),
     Discovered {rendezvous: KnownNode, peer: KnownNode},
     ReceivedRequest {source: KnownNode, request: NodeRequest},
-    ReceivedResponse(NodeResponse)
+    ReceivedResponse(NodeResponse),
+    RequestFailed {error: String, request_id: Uuid},
+    DiscoverFailed {error: String, peer: KnownNode}
 }
 
 impl EventKind {
@@ -115,7 +121,9 @@ impl EventKind {
             EventKind::Connected(_) => EventType::Connected,
             EventKind::Discovered { .. } => EventType::Discovered,
             EventKind::ReceivedRequest { .. } => EventType::Request,
-            EventKind::ReceivedResponse(_) => EventType::Response
+            EventKind::ReceivedResponse(_) => EventType::Response,
+            EventKind::RequestFailed {..} => EventType::RequestFailed,
+            EventKind::DiscoverFailed { .. } => EventType::DiscoverFailed
         }
     }
 }

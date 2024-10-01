@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::task::{spawn, JoinHandle};
 use uuid::Uuid;
 
-use crate::event_loop::EventLoop;
+use crate::event_loop::{EventLoop, KnownNode};
 use crate::types::{
     Command, CommandKind, Error, Event, EventKind, EventType, NodeRequest, NodeResponse, PodResult,
 };
@@ -264,12 +264,26 @@ impl Node {
     pub async fn on_event(
         &self,
         event: EventType,
-        listener: fn(EventKind) -> (),
+        listener: impl Fn(EventKind) -> () + Sync + Send + 'static,
     ) -> PodResult<Uuid> {
         self.execute_command::<Uuid>(CommandKind::RegisterListener(
             crate::event_loop::Listener::Event {
-                kind: event,
-                listener,
+                kind: vec![event],
+                listener: Arc::new(Mutex::new(listener)),
+            },
+        ))
+        .await
+    }
+
+    pub async fn on_events(
+        &self,
+        events: Vec<EventType>,
+        listener: impl Fn(EventKind) -> () + Sync + Send + 'static,
+    ) -> PodResult<Uuid> {
+        self.execute_command::<Uuid>(CommandKind::RegisterListener(
+            crate::event_loop::Listener::Event {
+                kind: events,
+                listener: Arc::new(Mutex::new(listener)),
             },
         ))
         .await
@@ -282,7 +296,7 @@ impl Node {
     >(
         &self,
         path: String,
-        listener: fn(T) -> Result<R, E>,
+        listener: impl Fn(T) -> Result<R, E> + Sync + Send + 'static,
     ) -> PodResult<Uuid> {
         let process_internal = move |request: NodeRequest| {
             {
@@ -309,6 +323,41 @@ impl Node {
             },
         ))
         .await
+    }
+
+    pub async fn request<T: Serialize + DeserializeOwned + Clone, R: Serialize + DeserializeOwned + Clone, E: Serialize + DeserializeOwned + Clone>(
+        &self,
+        peer: String,
+        path: String,
+        data: T
+    ) -> PodResult<Result<R, E>> {
+        let peer_id = PeerId::from_str(peer.clone().as_str()).or(Err(Error::InvalidPeerId(peer.clone())))?;
+        let request = NodeRequest::new(self.peer_id(), path, data.clone())?;
+        let rq_id = request.id.clone();
+        let (tx, rx) = bounded::<Result<Value, Value>>(1);
+        let listener = self.on_events(vec![EventType::Response, EventType::RequestFailed], move |evt| {
+            if let EventKind::ReceivedResponse(resp) = evt {
+                if resp.request_id == rq_id {
+                    let _ = tx.send_blocking(resp.content);
+                }
+            } else if let EventKind::RequestFailed { error, request_id } = evt {
+                if request_id == rq_id {
+                    let _ = tx.send_blocking(Err::<Value, Value>(serde_json::to_value(Error::RequestFailed(error.to_string())).expect("Failed to encode internal error.")));
+                }
+            }
+        }).await?;
+        self.execute_command::<()>(CommandKind::SendRequest { target: peer_id, request }).await?;
+        let result = rx.recv().await.or_else(|e| Err(Error::ChannelFailure(e.to_string())))?;
+        self.execute_command::<()>(CommandKind::DeregisterListener(listener)).await?;
+        Ok(match result {
+            Ok(val) => Ok(serde_json::from_value::<R>(val.clone()).or_else(|e| Err(Error::JsonDecodingError { error: e.to_string(), contents: val.clone() }))?),
+            Err(val) => Err(serde_json::from_value::<E>(val.clone()).or_else(|e| Err(Error::JsonDecodingError { error: e.to_string(), contents: val.clone() }))?)
+        })
+    }
+
+    pub async fn get_peers(&self) -> PodResult<Vec<KnownNode>> {
+        self.execute_command::<Vec<PeerId>>(CommandKind::DiscoverPeers).await?;
+        self.execute_command::<Vec<KnownNode>>(CommandKind::GetKnownNodes).await
     }
 }
 

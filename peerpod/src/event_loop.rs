@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use async_channel::{Receiver, Sender};
 use libp2p::{
-    futures::StreamExt, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
+    futures::StreamExt, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, OutboundRequestId, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,14 +26,15 @@ pub struct EventLoop {
     pub address: String,
     pub node_info: NodeInfo,
     pub channels: HashMap<Uuid, ResponseChannel<NodeResponse>>,
+    pub active_requests: HashMap<OutboundRequestId, Uuid>,
     pub listeners: HashMap<Uuid, Listener>
 }
 
 #[derive(Clone)]
 pub enum Listener {
     Event {
-        kind: EventType,
-        listener: fn(EventKind) -> ()
+        kind: Vec<EventType>,
+        listener: Arc<Mutex<dyn Fn(EventKind) -> () + Send + Sync>>
     },
     Request {
         path: String,
@@ -101,6 +102,7 @@ impl EventLoop {
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) -> PodResult<()> {
+        println!("EVENT :: {event:?}");
         match event {
             SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
                 let result = self.add_known(KnownNode {
@@ -165,6 +167,11 @@ impl EventLoop {
                         }
                         Ok(())
                     }
+                    RsvEvent::DiscoverFailed { rendezvous_node, error, .. } => {
+                        let rsv_node = self.ensure_known(rendezvous_node);
+                        self.event(EventKind::DiscoverFailed { error: format!("{error:?}"), peer: rsv_node }).await;
+                        Ok(())
+                    }
                     _ => Ok(())
                 },
                 BehaviourEvent::RequestResponse(req) => match req {
@@ -180,6 +187,12 @@ impl EventLoop {
                             Ok(())
                         }
                     },
+                    ReqEvent::OutboundFailure { request_id, error, .. } => {
+                        if let Some(req_id) = self.active_requests.remove(&request_id) {
+                            self.event(EventKind::RequestFailed { error: error.to_string(), request_id: req_id }).await;
+                        }
+                        Ok(())
+                    }
                     _ => Ok(())
                 }
                 _ => Ok(())
@@ -194,16 +207,8 @@ impl EventLoop {
                 command.reply(Ok(self.known_nodes.clone())).await;
             },
             CommandKind::SendRequest { target, request } => {
-                self.swarm.behaviour_mut().request_response.send_request(&target, request.clone());
+                self.active_requests.insert(self.swarm.behaviour_mut().request_response.send_request(&target, request.clone()), request.clone().id);
                 command.reply(Ok(())).await;
-            },
-            CommandKind::SendResponse {response } => {
-                if let Some(channel) = self.channels.remove(&response.clone().request_id) {
-                    let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.clone());
-                    command.reply(Ok(())).await;
-                } else {
-                    command.reply::<()>(Err(Error::ExpiredRequest)).await;
-                }
             },
             CommandKind::RegisterListener(listener) => {
                 let id = Uuid::new_v4();
@@ -216,6 +221,19 @@ impl EventLoop {
                 } else {
                     command.reply::<()>(Err(Error::UnknownListener(id.clone()))).await;
                 }
+            },
+            CommandKind::DiscoverPeers => {
+                let mut rsv_nodes = Vec::<PeerId>::new();
+                for node in self.known_nodes.clone() {
+                    if self.is_rendezvous(node.id) {
+                        println!("CHECKING :: {node:?}");
+                        if let Ok(ns) = self.namespace() {
+                            self.swarm.behaviour_mut().rendezvous.discover(Some(ns), None, None, node.id.clone());
+                            rsv_nodes.push(node.id.clone());
+                        }
+                    }
+                }
+                command.reply(Ok(rsv_nodes)).await;
             }
         }
         Ok(())
@@ -224,12 +242,15 @@ impl EventLoop {
     async fn event(&mut self, event: EventKind) {
         let _ = self.events.send(event.wrap()).await;
         let event_type = event.kind();
+        let mut found_listener = 0;
         for listener in self.listeners.values() {
             let evt = event.clone();
             match listener {
                 Listener::Event { kind, listener } => {
-                    if *kind == event_type {
-                        listener(evt);
+                    if kind.contains(&event_type) {
+                        if let Ok(func) = listener.lock() {
+                            func(evt);
+                        }
                     }
                 },
                 Listener::Request { path, listener } => {
@@ -239,11 +260,21 @@ impl EventLoop {
                                 let response = func(request.clone());
                                 if let Some(ch) = self.channels.remove(&response.request_id) {
                                     let _ = self.swarm.behaviour_mut().request_response.send_response(ch, response);
+                                    found_listener += 1;
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if let EventKind::ReceivedRequest { request, .. } = event.clone() {
+            if found_listener == 0 {
+                if let Some(ch) = self.channels.remove(&request.id) {
+                    let _ = self.swarm.behaviour_mut().request_response.send_response(ch, request.respond::<(), Error>(Err(Error::NoListener)).expect("Failed to wrap internal error."));
+                }
+                
             }
         }
     }
@@ -298,7 +329,8 @@ impl EventLoop {
             address,
             node_info: info,
             channels: HashMap::new(),
-            listeners: HashMap::new()
+            listeners: HashMap::new(),
+            active_requests: HashMap::new()
         }
     }
 }
