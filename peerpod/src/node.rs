@@ -14,6 +14,7 @@ use libp2p::{
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
     tcp, upnp, yamux, Multiaddr, PeerId,
+    ping
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub struct Behaviour {
     pub identify: identify::Behaviour,
     pub upnp: upnp::tokio::Behaviour,
     pub autonat: autonat::Behaviour,
+    pub ping: ping::Behaviour
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +189,7 @@ impl Node {
                     key.public().to_peer_id(),
                     autonat::Config::default(),
                 ),
+                ping: ping::Behaviour::default()
             })
             .or_else(|e| {
                 Err(Error::SwarmError {
@@ -358,6 +361,21 @@ impl Node {
     pub async fn get_peers(&self) -> PodResult<Vec<KnownNode>> {
         self.execute_command::<Vec<PeerId>>(CommandKind::DiscoverPeers).await?;
         self.execute_command::<Vec<KnownNode>>(CommandKind::GetKnownNodes).await
+    }
+
+    pub async fn get_connected_peers(&self) -> PodResult<Vec<KnownNode>> {
+        self.execute_command::<Vec<KnownNode>>(CommandKind::ActiveConnections).await
+    }
+
+    pub async fn is_connected(&self, peer: PeerId) -> bool {
+        if let Ok(connected) = self.get_connected_peers().await {
+            for node in connected {
+                if node.id == peer {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 

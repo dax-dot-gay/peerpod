@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use async_channel::{Receiver, Sender};
 use chrono::Utc;
 use libp2p::{
-    futures::StreamExt, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, OutboundRequestId, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
+    futures::StreamExt, ping::Failure, rendezvous::{client::Event as RsvEvent, Namespace}, request_response::{Event as ReqEvent, Message, OutboundRequestId, ResponseChannel}, swarm::SwarmEvent, Multiaddr, PeerId, Swarm
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -198,6 +198,20 @@ impl EventLoop {
                         Ok(())
                     }
                     _ => Ok(())
+                },
+                BehaviourEvent::Ping(ping) => {
+                    if let Err(error) = ping.result {
+                        match error {
+                            Failure::Timeout => {
+                                self.swarm.close_connection(ping.connection);
+                            },
+                            Failure::Unsupported => {
+                                self.swarm.close_connection(ping.connection);
+                            },
+                            _ => ()
+                        }
+                    }
+                    Ok(())
                 }
                 _ => Ok(())
             }
@@ -238,6 +252,14 @@ impl EventLoop {
                     }
                 }
                 command.reply(Ok(rsv_nodes)).await;
+            },
+            CommandKind::ActiveConnections => {
+                let mut result = Vec::<KnownNode>::new();
+                let peer_ids = self.swarm.connected_peers().map(|i| i.clone()).collect::<Vec<PeerId>>();
+                for peer in peer_ids {
+                    result.push(self.ensure_known(peer.clone()));
+                }
+                command.reply(Ok(result)).await;
             }
         }
         Ok(())

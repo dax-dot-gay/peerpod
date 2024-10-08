@@ -54,7 +54,8 @@ pub enum CommandKind {
     SendRequest{target: PeerId, request: NodeRequest},
     RegisterListener(Listener),
     DeregisterListener(Uuid),
-    DiscoverPeers
+    DiscoverPeers,
+    ActiveConnections
 }
 
 #[derive(Clone)]
